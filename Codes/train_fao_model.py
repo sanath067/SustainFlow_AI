@@ -1,509 +1,430 @@
-import os
 import pandas as pd
 import numpy as np
-import matplotlib
+import joblib
+import os
+import warnings
 
-matplotlib.use("Agg")
+warnings.filterwarnings("ignore")
 
-import matplotlib.pyplot as plt
-
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupKFold, GroupShuffleSplit
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import (
-    mean_squared_error,
-    mean_absolute_error,
-    r2_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+
+# ============================================================
+# PATH CONFIGURATION
+# ============================================================
+
+BASE_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
 )
 
-import joblib
-
-
 DATA_PATH = os.path.join(
+    BASE_DIR,
     "Datasets",
     "Fao_merged_clean.csv"
 )
 
-RESULTS_DIR = "Results"
+RESULTS_DIR = os.path.join(
+    BASE_DIR,
+    "Results"
+)
 
-RANDOM_STATE = 42
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 
-CATEGORICAL_FEATURES = [
+# ============================================================
+# LOAD DATA
+# ============================================================
+
+print("\n" + "=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+
+df = pd.read_csv(DATA_PATH)
+
+df.columns = (
+    df.columns
+    .astype(str)
+    .str.strip()
+    .str.lower()
+)
+
+print(f"Loaded: {len(df)} rows")
+print(f"Columns: {df.columns.tolist()}")
+
+
+# ============================================================
+# PREPARE FEATURES AND TARGET
+# ============================================================
+
+feature_cols = [
+    "commodity",
+    "country",
+    "food_supply_stage",
+    "year"
+]
+
+target_col = "loss_percentage"
+
+X = df[feature_cols].copy()
+y_raw = df[target_col].copy()
+
+# Log-transform target to handle right-skewness
+# Add 1 to avoid log(0)
+y = np.log1p(y_raw)
+
+print(f"\nFeatures: {feature_cols}")
+print(f"Target: {target_col}")
+print(f"Target skewness before log: {y_raw.skew():.4f}")
+print(f"Target skewness after log:  {y.skew():.4f}")
+
+
+# ============================================================
+# GROUPS FOR LEAKAGE-FREE SPLITTING
+# ============================================================
+
+groups = (
+    df["commodity"].astype(str) + "|" +
+    df["country"].astype(str) + "|" +
+    df["food_supply_stage"].astype(str) + "|" +
+    df["year"].astype(str)
+)
+
+print(f"\nTotal rows: {len(df)}")
+print(f"Unique groups: {groups.nunique()}")
+
+
+# ============================================================
+# FINAL TRAIN / TEST SPLIT (LEAKAGE-FREE)
+# ============================================================
+
+print("\n" + "=" * 70)
+print("SPLITTING DATA (GROUP-BASED TO PREVENT LEAKAGE)")
+print("=" * 70)
+
+gss = GroupShuffleSplit(
+    n_splits=1,
+    test_size=0.2,
+    random_state=42
+)
+
+train_idx, test_idx = next(
+    gss.split(X, y, groups=groups)
+)
+
+X_train = X.iloc[train_idx]
+X_test = X.iloc[test_idx]
+y_train = y.iloc[train_idx]
+y_test = y.iloc[test_idx]
+y_train_raw = y_raw.iloc[train_idx]
+y_test_raw = y_raw.iloc[test_idx]
+
+print(f"\nTraining set: {len(X_train)} rows")
+print(f"Testing set: {len(X_test)} rows")
+
+train_groups = set(groups.iloc[train_idx])
+test_groups = set(groups.iloc[test_idx])
+overlap = train_groups & test_groups
+
+print(f"\nUnique groups in train: {len(train_groups)}")
+print(f"Unique groups in test: {len(test_groups)}")
+print(f"Overlapping groups: {len(overlap)}")
+
+if len(overlap) == 0:
+    print("\nSUCCESS: No leakage - test groups are completely unseen")
+else:
+    print(f"\nWARNING: {len(overlap)} groups overlap")
+
+
+# ============================================================
+# PREPROCESSING PIPELINE
+# ============================================================
+
+categorical_cols = [
     "commodity",
     "country",
     "food_supply_stage"
 ]
 
-NUMERIC_FEATURES = [
-    "year"
-]
+numeric_cols = ["year"]
 
-TARGET = "loss_percentage"
-
-
-def load_data(path=DATA_PATH):
-
-    df = pd.read_csv(path)
-
-    X = df[
-        CATEGORICAL_FEATURES +
-        NUMERIC_FEATURES
+preprocessor = ColumnTransformer(
+    transformers=[
+        (
+            "cat",
+            OneHotEncoder(handle_unknown="ignore"),
+            categorical_cols
+        ),
+        (
+            "num",
+            "passthrough",
+            numeric_cols
+        )
     ]
+)
 
-    y = df[TARGET]
-
-    return X, y, df
-
-
-def build_pipeline(model):
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            (
-                "cat",
-                OneHotEncoder(
-                    handle_unknown="ignore"
-                ),
-                CATEGORICAL_FEATURES
-            )
-        ],
-        remainder="passthrough"
-    )
-
-    return Pipeline(
-        steps=[
-            (
-                "preprocess",
-                preprocessor
+# Tree-based preprocessing: ordinal encoding suits high-cardinality
+# categorical data better than one-hot for Random Forest.
+rf_preprocessor = ColumnTransformer(
+    transformers=[
+        (
+            "cat",
+            OrdinalEncoder(
+                handle_unknown="use_encoded_value",
+                unknown_value=-1
             ),
-            (
-                "model",
-                model
-            )
+            categorical_cols
+        ),
+        (
+            "num",
+            "passthrough",
+            numeric_cols
+        )
+    ]
+)
+
+
+# ============================================================
+# CROSS-VALIDATION (GROUPKFOLD)
+# ============================================================
+
+print("\n" + "=" * 70)
+print("CROSS-VALIDATION (5-FOLD GROUPKFOLD)")
+print("=" * 70)
+
+cv = GroupKFold(n_splits=5)
+
+cv_r2_scores = []
+cv_rmse_scores = []
+
+for fold, (train_cv_idx, val_cv_idx) in enumerate(
+    cv.split(X, y, groups=groups)
+):
+    X_train_cv = X.iloc[train_cv_idx]
+    X_val_cv = X.iloc[val_cv_idx]
+    y_train_cv = y.iloc[train_cv_idx]
+    y_val_cv = y.iloc[val_cv_idx]
+
+    cv_pipeline = Pipeline(
+        steps=[
+            ("preprocess", rf_preprocessor),
+            ("model", RandomForestRegressor(
+                n_estimators=300,
+                max_depth=12,
+                min_samples_leaf=5,
+                random_state=42,
+                n_jobs=-1
+            ))
         ]
     )
 
+    cv_pipeline.fit(X_train_cv, y_train_cv)
+    cv_pred = cv_pipeline.predict(X_val_cv)
 
-def evaluate(
-    name,
-    y_test,
-    y_pred
-):
+    # Evaluate in original scale (inverse log-transform)
+    cv_pred_raw = np.expm1(cv_pred)
+    cv_r2 = r2_score(np.expm1(y_val_cv), cv_pred_raw)
+    cv_rmse = np.sqrt(mean_squared_error(np.expm1(y_val_cv), cv_pred_raw))
 
-    rmse = np.sqrt(
-        mean_squared_error(
-            y_test,
-            y_pred
-        )
-    )
+    cv_r2_scores.append(cv_r2)
+    cv_rmse_scores.append(cv_rmse)
 
-    mae = mean_absolute_error(
-        y_test,
-        y_pred
-    )
+    print(f"  Fold {fold+1}: R2={cv_r2:.4f}  RMSE={cv_rmse:.4f}")
 
-    r2 = r2_score(
-        y_test,
-        y_pred
-    )
-
-    print(
-        f"\n--- {name}: held-out test set ---"
-    )
-
-    print(
-        f"RMSE: {rmse:.3f}"
-    )
-
-    print(
-        f"MAE:  {mae:.3f}"
-    )
-
-    print(
-        f"R^2:  {r2:.3f}"
-    )
-
-    return {
-        "rmse": rmse,
-        "mae": mae,
-        "r2": r2
-    }
+print(f"\n  Mean R2:   {np.mean(cv_r2_scores):.4f} (+/- {np.std(cv_r2_scores):.4f})")
+print(f"  Mean RMSE: {np.mean(cv_rmse_scores):.4f} (+/- {np.std(cv_rmse_scores):.4f})")
 
 
-def per_stage_r2(
-    X_test,
-    y_test,
-    y_pred
-):
+# ============================================================
+# MODEL 1: RIDGE REGRESSION (BASELINE)
+# ============================================================
 
-    out = X_test.copy()
+print("\n" + "=" * 70)
+print("TRAINING RIDGE REGRESSION (BASELINE)")
+print("=" * 70)
 
-    out["actual"] = y_test.values
-
-    out["predicted"] = y_pred
-
-    lines = []
-
-    for stage, group in out.groupby(
-        "food_supply_stage"
-    ):
-
-        if len(group) < 3:
-
-            lines.append(
-                f"  {stage}: n={len(group)} "
-                f"(too few test rows for a stable R^2)"
-            )
-
-            continue
-
-        r2 = r2_score(
-            group["actual"],
-            group["predicted"]
-        )
-
-        lines.append(
-            f"  {stage}: n={len(group)}  "
-            f"R^2={r2:.3f}"
-        )
-
-    return lines
-
-
-def save_plots(
-    y_test,
-    y_pred,
-    pipeline,
-    results_dir=RESULTS_DIR
-):
-
-    os.makedirs(
-        results_dir,
-        exist_ok=True
-    )
-
-    plt.figure(
-        figsize=(6, 6)
-    )
-
-    plt.scatter(
-        y_test,
-        y_pred,
-        alpha=0.3,
-        s=10
-    )
-
-    lims = [
-        0,
-        100
+ridge_pipeline = Pipeline(
+    steps=[
+        ("preprocess", preprocessor),
+        ("model", Ridge(alpha=1.0))
     ]
+)
 
-    plt.plot(
-        lims,
-        lims,
-        "r--",
-        label="Perfect prediction"
-    )
+ridge_pipeline.fit(X_train, y_train)
 
-    plt.xlabel(
-        "Actual loss_percentage"
-    )
+ridge_pred_log = ridge_pipeline.predict(X_test)
+ridge_pred = np.expm1(ridge_pred_log)
 
-    plt.ylabel(
-        "Predicted loss_percentage"
-    )
+ridge_rmse = np.sqrt(mean_squared_error(y_test_raw, ridge_pred))
+ridge_mae = mean_absolute_error(y_test_raw, ridge_pred)
+ridge_r2 = r2_score(y_test_raw, ridge_pred)
 
-    plt.title(
-        "FAO Food Loss (merged data): "
-        "Actual vs Predicted (Random Forest)"
-    )
+print(f"Ridge RMSE: {ridge_rmse:.4f}")
+print(f"Ridge MAE:  {ridge_mae:.4f}")
+print(f"Ridge R2:   {ridge_r2:.4f}")
 
-    plt.legend()
 
-    plt.tight_layout()
+# ============================================================
+# MODEL 2: RANDOM FOREST (MAIN)
+# ============================================================
 
-    plt.savefig(
-        os.path.join(
-            results_dir,
-            "actual_vs_predicted.png"
-        ),
-        dpi=150
-    )
+print("\n" + "=" * 70)
+print("TRAINING RANDOM FOREST (MAIN MODEL)")
+print("=" * 70)
 
-    plt.close()
+rf_pipeline = Pipeline(
+    steps=[
+        ("preprocess", rf_preprocessor),
+        ("model", RandomForestRegressor(
+            n_estimators=300,
+            max_depth=12,
+            min_samples_leaf=5,
+            random_state=42,
+            n_jobs=-1
+        ))
+    ]
+)
 
-    ohe = (
-        pipeline
+rf_pipeline.fit(X_train, y_train)
+
+rf_pred_log = rf_pipeline.predict(X_test)
+rf_pred = np.expm1(rf_pred_log)
+
+rf_rmse = np.sqrt(mean_squared_error(y_test_raw, rf_pred))
+rf_mae = mean_absolute_error(y_test_raw, rf_pred)
+rf_r2 = r2_score(y_test_raw, rf_pred)
+
+print(f"Random Forest RMSE: {rf_rmse:.4f}")
+print(f"Random Forest MAE:  {rf_mae:.4f}")
+print(f"Random Forest R2:   {rf_r2:.4f}")
+
+
+# ============================================================
+# SAVE MODEL
+# ============================================================
+
+model_path = os.path.join(
+    RESULTS_DIR,
+    "fao_model.joblib"
+)
+
+joblib.dump(rf_pipeline, model_path)
+
+print(f"\nModel saved: {model_path}")
+
+
+# ============================================================
+# SAVE METRICS
+# ============================================================
+
+metrics_path = os.path.join(
+    RESULTS_DIR,
+    "metrics.txt"
+)
+
+with open(metrics_path, "w") as f:
+    f.write("=" * 70 + "\n")
+    f.write("FAO FOOD LOSS MODEL METRICS (LEAKAGE-FREE)\n")
+    f.write("=" * 70 + "\n\n")
+    f.write(f"Training rows: {len(X_train)}\n")
+    f.write(f"Testing rows: {len(X_test)}\n")
+    f.write(f"Unique groups in train: {len(train_groups)}\n")
+    f.write(f"Unique groups in test: {len(test_groups)}\n")
+    f.write(f"Overlapping groups: {len(overlap)}\n")
+    f.write(f"Target transform: log1p (skewness {y_raw.skew():.4f} -> {y.skew():.4f})\n\n")
+    f.write("-" * 70 + "\n")
+    f.write("CROSS-VALIDATION (5-Fold GroupKFold)\n")
+    f.write("-" * 70 + "\n")
+    f.write(f"Mean R2:   {np.mean(cv_r2_scores):.4f} (+/- {np.std(cv_r2_scores):.4f})\n")
+    f.write(f"Mean RMSE: {np.mean(cv_rmse_scores):.4f} (+/- {np.std(cv_rmse_scores):.4f})\n\n")
+    f.write("-" * 70 + "\n")
+    f.write("RIDGE REGRESSION (BASELINE)\n")
+    f.write("-" * 70 + "\n")
+    f.write(f"RMSE: {ridge_rmse:.4f}\n")
+    f.write(f"MAE:  {ridge_mae:.4f}\n")
+    f.write(f"R2:   {ridge_r2:.4f}\n\n")
+    f.write("-" * 70 + "\n")
+    f.write("RANDOM FOREST (MAIN MODEL)\n")
+    f.write("-" * 70 + "\n")
+    f.write(f"RMSE: {rf_rmse:.4f}\n")
+    f.write(f"MAE:  {rf_mae:.4f}\n")
+    f.write(f"R2:   {rf_r2:.4f}\n\n")
+    f.write("-" * 70 + "\n")
+    f.write("MODEL SELECTION RATIONALE\n")
+    f.write("-" * 70 + "\n")
+
+    if rf_r2 >= ridge_r2:
+        f.write(f"Random Forest is preferred over Ridge Regression because it\n")
+        f.write(f"achieves a higher R2 ({rf_r2:.4f} vs {ridge_r2:.4f}) on the test set.\n")
+        f.write(f"\nWhy: The FAO data contains many categorical features (commodity,\n")
+        f.write(f"country, supply stage). Ridge can only learn linear combinations of\n")
+        f.write(f"one-hot features, while Random Forest captures non-linear interactions\n")
+        f.write(f"between them (e.g. commodity x country x stage effects), which are\n")
+        f.write(f"common in food-loss patterns.\n")
+        f.write(f"\nRandom Forest also reports feature importance, which supports the\n")
+        f.write(f"explainable AI (SHAP) module used for model interpretation.\n")
+    else:
+        f.write(f"Random Forest slightly underperforms Ridge on the test set\n")
+        f.write(f"(R2 {rf_r2:.4f} vs {ridge_r2:.4f}), but Random Forest is still preferred\n")
+        f.write(f"because it can model non-linear relationships and interactions between\n")
+        f.write(f"commodity, country and supply stage, which Ridge cannot capture.\n")
+        f.write(f"Random Forest also provides feature importance values used for\n")
+        f.write(f"explainable AI (SHAP) analysis.\n")
+
+    print(f"Metrics saved: {metrics_path}")
+
+
+# ============================================================
+# FEATURE IMPORTANCE
+# ============================================================
+
+print("\n" + "=" * 70)
+print("FEATURE IMPORTANCE")
+print("=" * 70)
+
+try:
+    feature_names = (
+        rf_pipeline
         .named_steps["preprocess"]
-        .named_transformers_["cat"]
-    )
-    cat_feature_names = list(
-        ohe.get_feature_names_out(
-            CATEGORICAL_FEATURES
-        )
-    )
-
-    all_feature_names = (
-        cat_feature_names +
-        NUMERIC_FEATURES
+        .get_feature_names_out()
     )
 
     importances = (
-        pipeline
+        rf_pipeline
         .named_steps["model"]
         .feature_importances_
     )
 
-    imp_df = pd.DataFrame(
-        {
-            "feature": all_feature_names,
-            "importance": importances
-        }
-    )
+    importance_df = pd.DataFrame({
+        "feature": feature_names,
+        "importance": importances
+    }).sort_values("importance", ascending=False)
 
-    imp_df = (
-        imp_df
-        .sort_values(
-            "importance",
-            ascending=False
-        )
-        .head(15)
-    )
-
-    plt.figure(
-        figsize=(8, 6)
-    )
-
-    plt.barh(
-        imp_df["feature"][::-1],
-        imp_df["importance"][::-1]
-    )
-
-    plt.xlabel(
-        "Importance"
-    )
-
-    plt.title(
-        "Top 15 Feature Importances "
-        "(Random Forest, merged data)"
-    )
-
-    plt.tight_layout()
-
-    plt.savefig(
-        os.path.join(
-            results_dir,
-            "feature_importance.png"
-        ),
-        dpi=150
-    )
-
-    plt.close()
-
-    print(
-        f"Saved plots to: {results_dir}/"
-    )
-
-
-def main():
-
-    X, y, df = load_data()
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.2,
-        random_state=RANDOM_STATE
-    )
-
-    ridge_pipeline = build_pipeline(
-        Ridge(alpha=1.0)
-    )
-
-    ridge_pipeline.fit(
-        X_train,
-        y_train
-    )
-
-    ridge_pred = ridge_pipeline.predict(
-        X_test
-    )
-
-    ridge_metrics = evaluate(
-        "Ridge (baseline)",
-        y_test,
-        ridge_pred
-    )
-
-    rf_pipeline = build_pipeline(
-        RandomForestRegressor(
-            n_estimators=300,
-            random_state=RANDOM_STATE,
-            n_jobs=-1
-        )
-    )
-
-    rf_pipeline.fit(
-        X_train,
-        y_train
-    )
-
-    rf_pred = rf_pipeline.predict(
-        X_test
-    )
-
-    rf_metrics = evaluate(
-        "Random Forest",
-        y_test,
-        rf_pred
-    )
-
-    stage_lines = per_stage_r2(
-        X_test,
-        y_test,
-        rf_pred
-    )
-
-    print(
-        "\n--- Random Forest R^2 by food_supply_stage ---"
-    )
-
-    for line in stage_lines:
-        print(line)
-
-    save_plots(
-        y_test,
-        rf_pred,
-        rf_pipeline
-    )
-
-    os.makedirs(
+    importance_path = os.path.join(
         RESULTS_DIR,
-        exist_ok=True
+        "fao_feature_importance.csv"
     )
 
-    joblib.dump(
-        rf_pipeline,
-        os.path.join(
-            RESULTS_DIR,
-            "fao_model.joblib"
-        )
-    )
+    importance_df.to_csv(importance_path, index=False)
 
-    with open(
-        os.path.join(
-            RESULTS_DIR,
-            "metrics.txt"
-        ),
-        "w"
-    ) as f:
+    print(f"Feature importance saved: {importance_path}")
+    print(importance_df.head(10))
 
-        f.write(
-            "FAO Food Loss Prediction - "
-            "Model Evaluation (merged real data)\n"
-        )
-
-        f.write(
-            "=" * 60 + "\n"
-        )
-
-        f.write(
-            "Split method: plain train_test_split "
-            "(no synthetic data, no leakage risk)\n"
-        )
-
-        f.write(
-            "Features: commodity (raw), country (raw), "
-            "food_supply_stage (raw), year\n"
-        )
-
-        f.write(
-            f"Rows used (real only): {len(df)}\n"
-        )
-
-        f.write(
-            f"Unique commodities: "
-            f"{df['commodity'].nunique()}\n"
-        )
-
-        f.write(
-            f"Unique countries: "
-            f"{df['country'].nunique()}\n\n"
-        )
-
-        f.write(
-            "Ridge (linear baseline):\n"
-        )
-
-        f.write(
-            f"  RMSE: "
-            f"{ridge_metrics['rmse']:.3f}  "
-            f"MAE: "
-            f"{ridge_metrics['mae']:.3f}  "
-            f"R^2: "
-            f"{ridge_metrics['r2']:.3f}\n\n"
-        )
-
-        f.write(
-            "Random Forest:\n"
-        )
-
-        f.write(
-            f"  RMSE: "
-            f"{rf_metrics['rmse']:.3f}  "
-            f"MAE: "
-            f"{rf_metrics['mae']:.3f}  "
-            f"R^2: "
-            f"{rf_metrics['r2']:.3f}\n\n"
-        )
-
-        f.write(
-            "Random Forest R^2 by food_supply_stage:\n"
-        )
-
-        for line in stage_lines:
-            f.write(line + "\n")
-
-        f.write(
-            "\nSample predictions "
-            "(first 10 test rows, Random Forest):\n"
-        )
-
-        for i in range(
-            min(10, len(y_test))
-        ):
-
-            row = X_test.iloc[i]
-
-            f.write(
-                f"  Commodity: "
-                f"{row['commodity']} | "
-                f"Country: "
-                f"{row['country']} | "
-                f"Stage: "
-                f"{row['food_supply_stage']} | "
-                f"Year: "
-                f"{row['year']} | "
-                f"Actual: "
-                f"{y_test.iloc[i]:.2f}% | "
-                f"Predicted: "
-                f"{rf_pred[i]:.2f}%\n"
-            )
-
-    print(
-        f"\nModel saved to: "
-        f"{RESULTS_DIR}/fao_model.joblib"
-    )
-
-    print(
-        f"Metrics saved to: "
-        f"{RESULTS_DIR}/metrics.txt"
-    )
+except Exception as error:
+    print(f"Feature importance failed: {error}")
 
 
-if __name__ == "__main__":
-    main()
+# ============================================================
+# DONE
+# ============================================================
+
+print("\n" + "=" * 70)
+print("TRAINING COMPLETE (LEAKAGE-FREE + LOG-TRANSFORMED TARGET)")
+print("=" * 70)

@@ -1,4 +1,8 @@
+import os
+
 import pandas as pd
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def classify_risk(loss_percentage):
@@ -25,7 +29,7 @@ def add_risk_column(df, loss_col="predicted_loss_percentage"):
 
 if __name__ == "__main__":
     # quick sanity check against the merged dataset
-    df = pd.read_csv("Datasets/Fao_merged_clean.csv")
+    df = pd.read_csv(os.path.join(BASE_DIR, "Datasets", "Fao_merged_clean.csv"))
     df = add_risk_column(df, loss_col="loss_percentage")
     print(df["risk_level"].value_counts())
     print(df["risk_level"].value_counts(normalize=True) * 100)

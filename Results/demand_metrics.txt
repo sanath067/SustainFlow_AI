@@ -1,13 +1,37 @@
-============================================================
-MODULE 2: DEMAND FORECASTING RESULTS
-============================================================
+======================================================================
+MODULE 2 - DEMAND MODEL METRICS (TEMPORAL SPLIT)
+======================================================================
 
-RMSE: 13.9914
-MAE: 3.7693
-R2: 0.4285
+Training rows: 20760
+Testing rows: 5190
+Split: Temporal (80% train / 20% test)
 
-============================================================
-Model: LightGBM
-Training samples: 362,634
-Testing samples: 137,366
-Features used: 25
+----------------------------------------------------------------------
+LINEAR REGRESSION (BASELINE)
+----------------------------------------------------------------------
+RMSE: 330.7618
+MAE:  214.3132
+R2:   0.7364
+
+----------------------------------------------------------------------
+LIGHTGBM (MAIN MODEL)
+----------------------------------------------------------------------
+RMSE: 162.1208
+MAE:  74.7817
+R2:   0.9367
+
+----------------------------------------------------------------------
+MODEL SELECTION RATIONALE
+----------------------------------------------------------------------
+LightGBM is preferred over Linear Regression because it achieves
+a much higher R2 (0.9367 vs 0.7364) on the test set.
+
+Why: Demand is driven by non-linear effects such as lag history
+(lag_1, lag_2, lag_3), rolling averages and seasonal components.
+Linear Regression can only fit straight-line relationships between
+these features and demand, missing spikes and seasonal patterns.
+
+LightGBM is a gradient-boosted tree model that naturally learns
+non-linear feature interactions (e.g. lag_1 x month) and handles
+the many encoded categories efficiently, making it a better fit
+for time-series demand forecasting.

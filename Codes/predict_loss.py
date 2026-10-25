@@ -1,477 +1,1515 @@
-import pandas as pd
-import numpy as np
+import os
+import warnings
+
+warnings.filterwarnings("ignore")
+
 import joblib
-import shap
+import numpy as np
+import pandas as pd
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
-from openpyxl import Workbook
-from openpyxl.utils.dataframe import dataframe_to_rows
-import warnings
-warnings.filterwarnings('ignore')
 
-print("="*60)
-print("SUSTAINFLOW AI - FOOD LOSS PREDICTION WITH SHAP REPORT")
-print("="*60)
+# ============================================================
+# OPTIONAL LIBRARIES
+# ============================================================
 
-# Load model and data
-print("\nLoading model and data...")
-model = joblib.load('Results/fao_model.joblib')
-df = pd.read_csv('Datasets/Fao_merged_clean.csv')
+try:
+    import shap
 
-# ============================================
-# SELECT COMMODITY
-# ============================================
-print("\n" + "="*60)
-print("SELECT COMMODITY")
-print("="*60)
+    SHAP_AVAILABLE = True
 
-commodities = sorted(df['commodity'].unique())
-for i, c in enumerate(commodities, 1):
-    print(f"{i}. {c}")
+except ImportError:
 
-while True:
-    try:
-        choice = int(input("\nEnter your choice (1-{}): ".format(len(commodities))))
-        if 1 <= choice <= len(commodities):
-            commodity = commodities[choice - 1]
-            print(f"\nSelected: {commodity}")
-            break
+    SHAP_AVAILABLE = False
+
+from xai_attribution import shap_or_loo_fao_prediction
+
+
+# ============================================================
+# PATH CONFIGURATION
+# ============================================================
+
+BASE_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+DATA_PATH = os.path.join(
+    BASE_DIR,
+    "Datasets",
+    "Fao_merged_clean.csv"
+)
+
+MODEL_PATH = os.path.join(
+    BASE_DIR,
+    "Results",
+    "fao_model.joblib"
+)
+
+RESULTS_DIR = os.path.join(
+    BASE_DIR,
+    "Results"
+)
+
+
+# ============================================================
+# HELPER FUNCTION: CLEAN TEXT
+# ============================================================
+
+def clean_text(value):
+
+    if pd.isna(value):
+        return ""
+
+    return str(value).strip()
+
+
+# ============================================================
+# LOAD DATASET
+# ============================================================
+
+def load_dataset():
+
+    print("\n" + "=" * 70)
+    print("LOADING FAO DATASET")
+    print("=" * 70)
+
+    print(
+        f"\nDataset path:\n{DATA_PATH}"
+    )
+
+    df = pd.read_csv(
+        DATA_PATH
+    )
+
+    df.columns = (
+        df.columns
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    print(
+        f"\nDataset loaded successfully."
+    )
+
+    print(
+        f"Total rows: {len(df)}"
+    )
+
+    print(
+        f"Total columns: {len(df.columns)}"
+    )
+
+    required_columns = [
+        "commodity",
+        "country",
+        "food_supply_stage",
+        "year",
+        "loss_percentage"
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in df.columns
+    ]
+
+    if missing_columns:
+
+        print(
+            "\nERROR: Required columns are missing."
+        )
+
+        print(
+            f"Missing columns: {missing_columns}"
+        )
+
+        print(
+            f"Available columns: "
+            f"{df.columns.tolist()}"
+        )
+
+        raise ValueError(
+            "Dataset does not contain the "
+            "required columns."
+        )
+
+    # Clean categorical columns
+    for column in [
+        "commodity",
+        "country",
+        "food_supply_stage"
+    ]:
+
+        df[column] = (
+            df[column]
+            .apply(clean_text)
+        )
+
+    # Convert numeric columns
+    df["year"] = pd.to_numeric(
+        df["year"],
+        errors="coerce"
+    )
+
+    df["loss_percentage"] = pd.to_numeric(
+        df["loss_percentage"],
+        errors="coerce"
+    )
+
+    # Remove invalid rows
+    df = df.dropna(
+        subset=[
+            "commodity",
+            "country",
+            "food_supply_stage",
+            "year",
+            "loss_percentage"
+        ]
+    )
+
+    # Remove empty categorical values
+    df = df[
+        (
+            df["commodity"] != ""
+        )
+        &
+        (
+            df["country"] != ""
+        )
+        &
+        (
+            df["food_supply_stage"] != ""
+        )
+    ]
+
+    print(
+        f"\nUsable rows: {len(df)}"
+    )
+
+    return df
+
+
+# ============================================================
+# LOAD TRAINED MODEL
+# ============================================================
+
+def load_model():
+
+    print("\n" + "=" * 70)
+    print("LOADING TRAINED FAO MODEL")
+    print("=" * 70)
+
+    if not os.path.exists(
+        MODEL_PATH
+    ):
+
+        raise FileNotFoundError(
+            f"\nModel not found:\n"
+            f"{MODEL_PATH}\n\n"
+            f"Run train_fao_model.py first."
+        )
+
+    pipeline = joblib.load(
+        MODEL_PATH
+    )
+
+    print(
+        "\nModel loaded successfully."
+    )
+
+    return pipeline
+
+
+# ============================================================
+# DISPLAY ALL OPTIONS
+# ============================================================
+
+def display_all_options(
+    title,
+    values
+):
+
+    print("\n" + "=" * 70)
+
+    print(
+        title.upper()
+    )
+
+    print("=" * 70)
+
+    print(
+        f"\nTotal available options: "
+        f"{len(values)}\n"
+    )
+
+    # Display ALL items
+    for index, value in enumerate(
+        values,
+        start=1
+    ):
+
+        print(
+            f"{index}. {value}"
+        )
+
+    print(
+        "\n" + "=" * 70
+    )
+
+
+# ============================================================
+# SELECT OPTION
+# ============================================================
+
+def select_option(
+    title,
+    values
+):
+
+    display_all_options(
+        title,
+        values
+    )
+
+    while True:
+
+        user_input = input(
+            f"\nEnter {title} "
+            f"(number or name): "
+        ).strip()
+
+        # Number selection
+        if user_input.isdigit():
+
+            selected_index = (
+                int(user_input) - 1
+            )
+
+            if (
+                0 <= selected_index
+                < len(values)
+            ):
+
+                selected_value = (
+                    values[
+                        selected_index
+                    ]
+                )
+
+                print(
+                    f"\nSelected {title}: "
+                    f"{selected_value}"
+                )
+
+                return selected_value
+
+            else:
+
+                print(
+                    "\nInvalid number."
+                )
+
+                print(
+                    "Please enter a number "
+                    "from the displayed list."
+                )
+
+                continue
+
+        # Exact text selection
+        for value in values:
+
+            if (
+                value.lower()
+                ==
+                user_input.lower()
+            ):
+
+                print(
+                    f"\nSelected {title}: "
+                    f"{value}"
+                )
+
+                return value
+
+        # Suggestions
+        suggestions = [
+            value
+            for value in values
+            if (
+                user_input.lower()
+                in
+                value.lower()
+            )
+        ]
+
+        if suggestions:
+
+            print(
+                "\nNo exact match found."
+            )
+
+            print(
+                "\nSuggestions:"
+            )
+
+            for index, value in enumerate(
+                suggestions,
+                start=1
+            ):
+
+                print(
+                    f"{index}. {value}"
+                )
+
+            suggestion_input = input(
+                "\nEnter suggestion number "
+                "or type again: "
+            ).strip()
+
+            if suggestion_input.isdigit():
+
+                suggestion_index = (
+                    int(
+                        suggestion_input
+                    ) - 1
+                )
+
+                if (
+                    0 <= suggestion_index
+                    < len(suggestions)
+                ):
+
+                    selected_value = (
+                        suggestions[
+                            suggestion_index
+                        ]
+                    )
+
+                    print(
+                        f"\nSelected {title}: "
+                        f"{selected_value}"
+                    )
+
+                    return selected_value
+
+            print(
+                "\nPlease try again."
+            )
+
         else:
-            print(f"Please enter a number between 1 and {len(commodities)}")
-    except ValueError:
-        print("Please enter a valid number.")
 
-# ============================================
-# SELECT COUNTRY
-# ============================================
-print("\n" + "="*60)
-print("SELECT COUNTRY")
-print("="*60)
+            print(
+                "\nNo matching option found."
+            )
 
-countries = sorted(df['country'].unique())
-for i, c in enumerate(countries, 1):
-    print(f"{i}. {c}")
+            print(
+                "Please select from "
+                "the available list."
+            )
 
-while True:
-    try:
-        choice = int(input("\nEnter your choice (1-{}): ".format(len(countries))))
-        if 1 <= choice <= len(countries):
-            country = countries[choice - 1]
-            print(f"\nSelected: {country}")
-            break
-        else:
-            print(f"Please enter a number between 1 and {len(countries)}")
-    except ValueError:
-        print("Please enter a valid number.")
 
-# ============================================
-# SELECT FOOD SUPPLY STAGE
-# ============================================
-print("\n" + "="*60)
-print("SELECT FOOD SUPPLY STAGE")
-print("="*60)
-
-stages = sorted(df['food_supply_stage'].unique())
-for i, s in enumerate(stages, 1):
-    print(f"{i}. {s}")
-
-while True:
-    try:
-        choice = int(input("\nEnter your choice (1-{}): ".format(len(stages))))
-        if 1 <= choice <= len(stages):
-            stage = stages[choice - 1]
-            print(f"\nSelected: {stage}")
-            break
-        else:
-            print(f"Please enter a number between 1 and {len(stages)}")
-    except ValueError:
-        print("Please enter a valid number.")
-
-# ============================================
+# ============================================================
 # SELECT YEAR
-# ============================================
-print("\n" + "="*60)
-print("SELECT YEAR")
-print("="*60)
+# ============================================================
 
-years = sorted(df['year'].unique())
-for i, y in enumerate(years, 1):
-    print(f"{i}. {y}")
+def select_year(
+    years
+):
 
-while True:
+    years = sorted(
+        years
+    )
+
+    display_all_options(
+        "Available Years",
+        years
+    )
+
+    while True:
+
+        user_input = input(
+            "\nEnter Year "
+            "(number or year): "
+        ).strip()
+
+        # Number from displayed list
+        if user_input.isdigit():
+
+            possible_index = (
+                int(user_input) - 1
+            )
+
+            if (
+                0 <= possible_index
+                < len(years)
+            ):
+
+                selected_year = years[
+                    possible_index
+                ]
+
+                print(
+                    f"\nSelected Year: "
+                    f"{selected_year}"
+                )
+
+                return selected_year
+
+            # Direct year input
+            entered_year = int(
+                user_input
+            )
+
+            if entered_year in years:
+
+                print(
+                    f"\nSelected Year: "
+                    f"{entered_year}"
+                )
+
+                return entered_year
+
+        print(
+            "\nInvalid year."
+        )
+
+        print(
+            "Please select a year "
+            "from the displayed list."
+        )
+
+
+# ============================================================
+# SAVE PREDICTION
+# ============================================================
+
+def save_prediction(
+    input_df,
+    prediction
+):
+
+    os.makedirs(
+        RESULTS_DIR,
+        exist_ok=True
+    )
+
+    result_df = input_df.copy()
+
+    result_df[
+        "predicted_loss_percentage"
+    ] = prediction
+
+    latest_prediction_path = os.path.join(
+        RESULTS_DIR,
+        "latest_prediction.csv"
+    )
+
+    result_df.to_csv(
+        latest_prediction_path,
+        index=False
+    )
+
+    print(
+        f"\nPrediction saved to:\n"
+        f"{latest_prediction_path}"
+    )
+
+    return latest_prediction_path
+
+
+# ============================================================
+# GET RISK LEVEL
+# ============================================================
+
+def get_risk_level(
+    prediction
+):
+
+    if prediction < 5:
+
+        return "LOW"
+
+    elif prediction < 15:
+
+        return "MEDIUM"
+
+    else:
+
+        return "HIGH"
+
+
+# ============================================================
+# GENERATE SHAP EXPLANATION
+# ============================================================
+
+def generate_shap_report(
+    pipeline,
+    input_df,
+    prediction,
+    df=None
+):
+
+    print("\n" + "=" * 70)
+    print("GENERATING SHAP EXPLANATION")
+    print("=" * 70)
+
+    if not SHAP_AVAILABLE:
+
+        print(
+            "\nWARNING: SHAP is not installed or is blocked."
+        )
+
+        print(
+            "Falling back to leave-one-out attribution."
+        )
+
     try:
-        choice = int(input("\nEnter your choice (1-{}): ".format(len(years))))
-        if 1 <= choice <= len(years):
-            year = years[choice - 1]
-            print(f"\nSelected: {year}")
-            break
+
+        # ====================================================
+        # GET PIPELINE COMPONENTS
+        # ====================================================
+
+        preprocessor = (
+            pipeline
+            .named_steps[
+                "preprocess"
+            ]
+        )
+
+        model = (
+            pipeline
+            .named_steps[
+                "model"
+            ]
+        )
+
+        # ====================================================
+        # TRANSFORM INPUT USING SAME PREPROCESSOR
+        # ====================================================
+
+        X_transformed = (
+            preprocessor.transform(
+                input_df
+            )
+        )
+
+        # Convert sparse matrix if necessary
+        if hasattr(
+            X_transformed,
+            "toarray"
+        ):
+
+            X_dense = (
+                X_transformed
+                .toarray()
+            )
+
         else:
-            print(f"Please enter a number between 1 and {len(years)}")
-    except ValueError:
-        print("Please enter a valid number.")
 
-# ============================================
-# PREDICTION
-# ============================================
-print("\n" + "="*60)
-print("PREDICTION RESULT")
-print("="*60)
+            X_dense = np.asarray(
+                X_transformed
+            )
 
-input_data = pd.DataFrame([{
-    'commodity': commodity,
-    'country': country,
-    'food_supply_stage': stage,
-    'year': year
-}])
+        print(
+            f"\nOriginal input shape: "
+            f"{input_df.shape}"
+        )
 
-try:
-    prediction = model.predict(input_data)[0]
-    print(f"\nFood item          : {commodity}")
-    print(f"Country            : {country}")
-    print(f"Food supply stage  : {stage}")
-    print(f"Year               : {year}")
-    print(f"\nPredicted food loss: {prediction:.2f}%")
-except Exception as e:
-    print(f"Prediction failed: {e}")
-    exit()
+        print(
+            f"Transformed input shape: "
+            f"{X_dense.shape}"
+        )
 
-exists = len(df[(df['commodity'] == commodity) & 
-                (df['country'] == country) & 
-                (df['food_supply_stage'] == stage) & 
-                (df['year'] == year)]) > 0
+        # ====================================================
+        # FEATURE NAMES
+        # ====================================================
 
-if exists:
-    actual = df[(df['commodity'] == commodity) & 
-                (df['country'] == country) & 
-                (df['food_supply_stage'] == stage) & 
-                (df['year'] == year)]['loss_percentage'].values[0]
-    print(f"\nData status        : Found in dataset")
-    print(f"Actual food loss   : {actual:.2f}%")
-    print(f"Prediction error   : {abs(prediction - actual):.2f}%")
-else:
-    print(f"\nData status        : Combination not directly found in FAO dataset")
-    print(f"Actual food loss   : Not available")
-    print(f"Prediction error   : Not available")
-    print(f"\nThis exact combination is not present in the dataset.")
-    print(f"The displayed loss percentage is a model-based estimate.")
-
-# ============================================
-# SHAP EXPLANATION
-# ============================================
-print("\n" + "="*60)
-print("EXPLAINABLE AI ANALYSIS")
-print("="*60)
-
-print(f"\nAnalyzing why the model produced a prediction of {prediction:.2f}%...")
-
-try:
-    # Get preprocessed data
-    preprocessed_data = model.named_steps['preprocess'].transform(input_data)
-    
-    if hasattr(preprocessed_data, 'toarray'):
-        preprocessed_data = preprocessed_data.toarray()
-    
-    feature_names = model.named_steps['preprocess'].get_feature_names_out()
-    
-    explainer = shap.TreeExplainer(model.named_steps['model'])
-    shap_values = explainer.shap_values(preprocessed_data, check_additivity=False)
-    
-    if isinstance(shap_values, list):
-        shap_values = shap_values[0]
-    
-    if len(shap_values.shape) == 1:
-        shap_values = shap_values.reshape(1, -1)
-    
-    shap_importance = pd.DataFrame({
-        'Feature': feature_names,
-        'SHAP_Value': shap_values[0]
-    }).sort_values('SHAP_Value', key=abs, ascending=False)
-    
-    abs_shap = np.abs(shap_values[0])
-    total_impact = abs_shap.sum()
-    
-    if total_impact > 0:
-        shap_importance['Contribution_%'] = (abs_shap / total_impact * 100).round(2)
-        shap_success = True
-    else:
-        shap_success = False
-        importances = model.named_steps['model'].feature_importances_
-        shap_importance['Contribution_%'] = (importances / importances.sum() * 100).round(2)
-        shap_success = True
-    
-    if shap_success:
-        print("\nThe following factors influenced this prediction:\n")
-        
-        for i, (idx, row) in enumerate(shap_importance.head(4).iterrows(), 1):
-            effect = "Increased" if row['SHAP_Value'] > 0 else "Decreased"
-            contrib = row['Contribution_%']
-            
-            if contrib >= 30:
-                level = "HIGH"
-            elif contrib >= 15:
-                level = "MEDIUM"
-            else:
-                level = "LOW"
-            
-            feature_name = row['Feature']
-            if '_' in feature_name:
-                parts = feature_name.split('_')
-                display = parts[0].capitalize()
-                value = '_'.join(parts[1:])
-            else:
-                display = feature_name
-                value = ''
-            
-            print(f"{i}. {display}")
-            print(f"   Selected value : {value if value else 'N/A'}")
-            print(f"   Effect         : {effect} predicted food loss")
-            print(f"   Influence      : {contrib:.2f}%")
-            print(f"   Influence level: {level}")
-            print()
-        
-        top_factor = shap_importance.iloc[0]
-        top_factor_name = top_factor['Feature']
-        top_factor_value = top_factor['SHAP_Value']
-        top_factor_contribution = top_factor['Contribution_%']
-        top_factor_effect = "Increased" if top_factor_value > 0 else "Decreased"
-        
-        print("-"*60)
-        print("EXPLANATION SUMMARY")
-        print("-"*60)
-        
-        print(f"\nPredicted food loss: {prediction:.2f}%")
-        print(f"\nThe strongest influencing factor was:\n")
-        print(f"{top_factor_name}")
-        print(f"Effect         : {top_factor_effect} predicted food loss")
-        print(f"Influence      : {top_factor_contribution:.2f}%")
-        print(f"Influence level: {'HIGH' if top_factor_contribution >= 30 else 'MEDIUM' if top_factor_contribution >= 15 else 'LOW'}")
-        
-        # ============================================
-        # GENERATE SHAP REPORT (PDF)
-        # ============================================
-        
-        print("\n" + "="*60)
-        print("GENERATING SHAP REPORT")
-        print("="*60)
-        
-        report_path = 'Results/shap_report.pdf'
-        
         try:
-            with PdfPages(report_path) as pdf:
-                
-                # Page 1: Summary + Prediction + Top Factor
-                fig1, ax1 = plt.subplots(figsize=(11, 8.5))
-                ax1.axis('off')
-                
-                ax1.text(0.5, 0.95, 'SHAP EXPLANATION REPORT', fontsize=20, ha='center', weight='bold')
-                ax1.text(0.5, 0.90, 'Food Loss Prediction - Explainable AI Report', fontsize=14, ha='center', style='italic')
-                
-                ax1.text(0.1, 0.80, 'PREDICTION RESULT', fontsize=14, weight='bold')
-                ax1.text(0.1, 0.74, f'Predicted Food Loss: {prediction:.2f}%', fontsize=16, weight='bold', color='blue')
-                
-                ax1.text(0.1, 0.65, 'INPUT DETAILS', fontsize=14, weight='bold')
-                ax1.text(0.1, 0.59, f'Commodity : {commodity}', fontsize=12)
-                ax1.text(0.1, 0.55, f'Country   : {country}', fontsize=12)
-                ax1.text(0.1, 0.51, f'Stage     : {stage}', fontsize=12)
-                ax1.text(0.1, 0.47, f'Year      : {year}', fontsize=12)
-                
-                ax1.text(0.55, 0.80, 'TOP INFLUENCING FACTOR', fontsize=14, weight='bold')
-                ax1.text(0.55, 0.74, f'Feature    : {top_factor_name}', fontsize=14, weight='bold')
-                ax1.text(0.55, 0.68, f'Effect     : {top_factor_effect} prediction', fontsize=14)
-                ax1.text(0.55, 0.62, f'Influence  : {top_factor_contribution:.1f}%', fontsize=14, color='red')
-                ax1.text(0.55, 0.56, f'SHAP Value : {top_factor_value:.4f}', fontsize=12)
-                
-                if top_factor_value > 0:
-                    ax1.text(0.55, 0.48, 'This feature INCREASED the prediction', fontsize=12, color='green')
+
+            feature_names = (
+                preprocessor
+                .get_feature_names_out()
+            )
+
+        except Exception:
+
+            feature_names = [
+                f"Feature_{index + 1}"
+                for index in range(
+                    X_dense.shape[1]
+                )
+            ]
+
+        feature_names = [
+            str(feature)
+            for feature in feature_names
+        ]
+
+        # ====================================================
+        # CREATE SHAP EXPLAINER (with LOO fallback)
+        # ====================================================
+
+        print(
+            "\nCalculating feature contributions..."
+        )
+
+        feature_names, shap_sample, method = shap_or_loo_fao_prediction(
+            pipeline,
+            input_df,
+            df
+        )
+
+        feature_names = [
+            str(feature)
+            for feature in feature_names
+        ]
+
+        if method == "loo":
+            print(
+                "\nWARNING: shap unavailable (blocked by Windows policy)."
+            )
+            print(
+                "Using leave-one-out local attribution instead."
+            )
+        else:
+            print(
+                "\nSHAP values calculated."
+            )
+
+        # ====================================================
+        # CREATE SHAP DATAFRAME
+        # ====================================================
+
+        shap_df = pd.DataFrame(
+            {
+                "feature":
+                    feature_names,
+
+                "shap_value":
+                    shap_sample,
+
+                "absolute_shap_value":
+                    np.abs(
+                        shap_sample
+                    )
+            }
+        )
+
+        shap_df = (
+            shap_df
+            .sort_values(
+                "absolute_shap_value",
+                ascending=False
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+        # ====================================================
+        # SAVE SHAP CSV
+        # ====================================================
+
+        shap_csv_path = os.path.join(
+            RESULTS_DIR,
+            "shap_importance.csv"
+        )
+
+        shap_df.to_csv(
+            shap_csv_path,
+            index=False
+        )
+
+        print(
+            f"\nSHAP importance saved to:\n"
+            f"{shap_csv_path}"
+        )
+
+        # ====================================================
+        # TOP FEATURES
+        # ====================================================
+
+        top_shap = (
+            shap_df
+            .head(15)
+            .copy()
+        )
+
+        # ====================================================
+        # GENERATE SHAP GRAPH
+        # ====================================================
+
+        plt.figure(
+            figsize=(12, 8)
+        )
+
+        ordered_features = (
+            top_shap[
+                "feature"
+            ].iloc[::-1]
+        )
+
+        ordered_values = (
+            top_shap[
+                "shap_value"
+            ].iloc[::-1]
+        )
+
+        bars = plt.barh(
+            ordered_features,
+            ordered_values
+        )
+
+        plt.xlabel(
+            "SHAP Contribution"
+        )
+
+        plt.ylabel(
+            "Feature"
+        )
+
+        plt.title(
+            "SHAP Feature Contribution "
+            "for Food Loss Prediction"
+        )
+
+        plt.grid(
+            axis="x",
+            alpha=0.3
+        )
+
+        for bar, value in zip(
+            bars,
+            ordered_values
+        ):
+
+            plt.text(
+                value,
+                bar.get_y()
+                +
+                bar.get_height() / 2,
+                f" {value:.4f}",
+                va="center",
+                fontsize=8
+            )
+
+        plt.tight_layout()
+
+        shap_graph_path = os.path.join(
+            RESULTS_DIR,
+            "shap_explanation.png"
+        )
+
+        plt.savefig(
+            shap_graph_path,
+            dpi=200,
+            bbox_inches="tight"
+        )
+
+        plt.close()
+
+        print(
+            f"\nSHAP graph saved to:\n"
+            f"{shap_graph_path}"
+        )
+
+        # ====================================================
+        # GENERATE SHAP PDF REPORT
+        # ====================================================
+
+        shap_pdf_path = os.path.join(
+            RESULTS_DIR,
+            "shap_report.pdf"
+        )
+
+        risk_level = get_risk_level(
+            prediction
+        )
+
+        with PdfPages(
+            shap_pdf_path
+        ) as pdf:
+
+            # ================================================
+            # PAGE 1 - PREDICTION SUMMARY
+            # ================================================
+
+            fig1, ax1 = plt.subplots(
+                figsize=(11.7, 8.3)
+            )
+
+            ax1.axis(
+                "off"
+            )
+
+            ax1.text(
+                0.5,
+                0.94,
+                "SUSTAINFLOW AI",
+                fontsize=22,
+                fontweight="bold",
+                ha="center"
+            )
+
+            ax1.text(
+                0.5,
+                0.88,
+                "SHAP Prediction Explanation Report",
+                fontsize=15,
+                ha="center"
+            )
+
+            ax1.text(
+                0.08,
+                0.78,
+                "PREDICTION INPUT",
+                fontsize=14,
+                fontweight="bold"
+            )
+
+            input_y = 0.71
+
+            input_labels = [
+                (
+                    "Commodity",
+                    input_df.iloc[
+                        0
+                    ]["commodity"]
+                ),
+                (
+                    "Country",
+                    input_df.iloc[
+                        0
+                    ]["country"]
+                ),
+                (
+                    "Food Supply Stage",
+                    input_df.iloc[
+                        0
+                    ][
+                        "food_supply_stage"
+                    ]
+                ),
+                (
+                    "Year",
+                    input_df.iloc[
+                        0
+                    ]["year"]
+                )
+            ]
+
+            for label, value in input_labels:
+
+                ax1.text(
+                    0.10,
+                    input_y,
+                    f"{label}: {value}",
+                    fontsize=11
+                )
+
+                input_y -= 0.055
+
+            ax1.text(
+                0.08,
+                0.42,
+                "MODEL PREDICTION",
+                fontsize=14,
+                fontweight="bold"
+            )
+
+            ax1.text(
+                0.10,
+                0.34,
+                f"Predicted Food Loss: "
+                f"{prediction:.2f}%",
+                fontsize=18,
+                fontweight="bold"
+            )
+
+            ax1.text(
+                0.10,
+                0.28,
+                f"Risk Level: "
+                f"{risk_level}",
+                fontsize=14,
+                fontweight="bold"
+            )
+
+            ax1.text(
+                0.08,
+                0.20,
+                "TOP FACTORS "
+                "INFLUENCING THE PREDICTION",
+                fontsize=14,
+                fontweight="bold"
+            )
+
+            factor_y = 0.14
+
+            for index, (
+                _,
+                row
+            ) in enumerate(
+                top_shap
+                .head(5)
+                .iterrows(),
+                start=1
+            ):
+
+                if (
+                    row[
+                        "shap_value"
+                    ]
+                    >= 0
+                ):
+
+                    direction = (
+                        "increases"
+                    )
+
                 else:
-                    ax1.text(0.55, 0.48, 'This feature DECREASED the prediction', fontsize=12, color='red')
-                
-                ax1.text(0.1, 0.35, 'SUMMARY', fontsize=14, weight='bold')
-                ax1.text(0.1, 0.29, f'The model predicted {prediction:.2f}% food loss for {commodity} in {country}.', fontsize=11)
-                ax1.text(0.1, 0.25, f'The strongest influencing factor was "{top_factor_name}" which {top_factor_effect.lower()} the prediction by {top_factor_contribution:.1f}%.', fontsize=11)
-                
-                ax1.text(0.5, 0.05, 'SustainFlow AI - Generated Report', fontsize=10, ha='center', style='italic')
-                
-                plt.tight_layout()
-                pdf.savefig(fig1, dpi=300)
-                plt.close()
-                
-                # Page 2: Bar Chart
-                fig2, ax2 = plt.subplots(figsize=(11, 8.5))
-                
-                top_10 = shap_importance.head(10)
-                colors = ['#FF6B6B' if x < 0 else '#51CF66' for x in top_10['SHAP_Value']]
-                bars = ax2.barh(top_10['Feature'], top_10['SHAP_Value'], color=colors)
-                
-                ax2.axvline(x=0, color='black', linestyle='-', linewidth=0.5)
-                ax2.set_xlabel('SHAP Value (Impact on Prediction)', fontsize=12)
-                ax2.set_ylabel('Features', fontsize=12)
-                ax2.set_title('Top 10 Features Affecting the Prediction', fontsize=14, weight='bold')
-                
-                for bar, value in zip(bars, top_10['SHAP_Value']):
-                    ax2.text(value + (0.1 if value > 0 else -0.1), 
-                             bar.get_y() + bar.get_height()/2, 
-                             f'{value:.2f}', 
-                             ha='left' if value > 0 else 'right', 
-                             va='center', 
-                             fontsize=10)
-                
-                for i, (idx, row) in enumerate(top_10.iterrows()):
-                    ax2.text(0.02, i, f"{row['Contribution_%']:.1f}%", 
-                             va='center', fontsize=9, color='black', weight='bold')
-                
-                ax2.text(0.02, -0.8, 'Note: Green = Increases prediction, Red = Decreases prediction', 
-                         fontsize=10, style='italic', color='gray')
-                
-                plt.tight_layout()
-                pdf.savefig(fig2, dpi=300)
-                plt.close()
-                
-                # Page 3: Pie Chart
-                fig3, ax3 = plt.subplots(figsize=(11, 8.5))
-                
-                top5 = shap_importance.head(5)
-                others_value = total_impact - top5['SHAP_Value'].abs().sum()
-                
-                pie_labels = list(top5['Feature'])
-                pie_values = list(top5['SHAP_Value'].abs())
-                if others_value > 0:
-                    pie_labels.append('Other Features')
-                    pie_values.append(others_value)
-                
-                colors_pie = plt.cm.Set3(np.linspace(0, 1, len(pie_labels)))
-                explode = [0.05] * len(pie_labels)
-                
-                wedges, texts, autotexts = ax3.pie(pie_values, 
-                                                    labels=pie_labels, 
-                                                    autopct='%1.1f%%', 
-                                                    startangle=90,
-                                                    colors=colors_pie,
-                                                    explode=explode)
-                
-                for autotext in autotexts:
-                    autotext.set_fontsize(11)
-                    autotext.set_weight('bold')
-                
-                ax3.set_title('Top 5 Features Contribution to Prediction', fontsize=14, weight='bold')
-                ax3.axis('equal')
-                ax3.text(0.5, -0.08, 'Based on absolute SHAP values', fontsize=10, ha='center', style='italic', color='gray')
-                
-                plt.tight_layout()
-                pdf.savefig(fig3, dpi=300)
-                plt.close()
-                
-                # Page 4: Full Feature Table
-                fig4, ax4 = plt.subplots(figsize=(11, 8.5))
-                ax4.axis('off')
-                
-                ax4.text(0.5, 0.95, 'COMPLETE FEATURE IMPACT TABLE', fontsize=16, ha='center', weight='bold')
-                ax4.text(0.5, 0.90, 'All features with their SHAP values and contribution percentages', fontsize=12, ha='center', style='italic')
-                
-                table_data = []
-                table_data.append(['Rank', 'Feature', 'SHAP Value', 'Contribution %', 'Effect'])
-                
-                for i, (idx, row) in enumerate(shap_importance.iterrows(), 1):
-                    effect = 'Increases' if row['SHAP_Value'] > 0 else 'Decreases'
-                    table_data.append([
-                        str(i),
-                        row['Feature'],
-                        f"{row['SHAP_Value']:.4f}",
-                        f"{row['Contribution_%']:.1f}%",
-                        effect
-                    ])
-                
-                table = ax4.table(cellText=table_data, 
-                                   loc='center', 
-                                   cellLoc='center',
-                                   colWidths=[0.08, 0.45, 0.15, 0.17, 0.15])
-                
-                table.auto_set_font_size(False)
-                table.set_fontsize(10)
-                
-                for i in range(5):
-                    table[(0, i)].set_facecolor('#4472C4')
-                    table[(0, i)].set_text_props(weight='bold', color='white')
-                
-                for i in range(1, len(table_data)):
-                    if 'Decreases' in table_data[i][4]:
-                        for j in range(5):
-                            table[(i, j)].set_facecolor('#FFE6E6')
-                    else:
-                        for j in range(5):
-                            table[(i, j)].set_facecolor('#E6FFE6')
-                
-                plt.tight_layout()
-                pdf.savefig(fig4, dpi=300)
-                plt.close()
-                
-                # Page 5: Waterfall Plot - SKIPPED to avoid errors
-                print("   - Page 5: Waterfall Plot (skipped to avoid error)")
-            
-            print(f"\nSHAP Report generated: {report_path}")
-            print("   Report contains:")
-            print("   - Page 1: Prediction Summary + Top Factor")
-            print("   - Page 2: Bar Chart (Top 10 Features)")
-            print("   - Page 3: Pie Chart (Top 5 Contribution)")
-            print("   - Page 4: Complete Feature Impact Table")
-            
-        except Exception as e:
-            print(f"PDF generation failed: {e}")
-    else:
-        print("Could not generate SHAP explanation.")
-    
-except Exception as e:
-    print(f"SHAP analysis failed: {e}")
-    print("Prediction completed successfully, but SHAP explanation could not be generated.")
 
-# ============================================
-# SAVE TO EXCEL
-# ============================================
+                    direction = (
+                        "decreases"
+                    )
 
-print("\n" + "="*60)
-print("SAVING TO EXCEL")
-print("="*60)
+                feature_name = str(
+                    row[
+                        "feature"
+                    ]
+                )
 
-excel_path = 'Results/final_results.xlsx'
+                if len(
+                    feature_name
+                ) > 55:
 
-try:
-    from openpyxl import load_workbook
-    import os
-    
-    if os.path.exists(excel_path):
-        wb = load_workbook(excel_path)
-        if 'Predictions' not in wb.sheetnames:
-            wb.create_sheet('Predictions')
-        ws = wb['Predictions']
-        row_num = ws.max_row + 1
-        if row_num == 2:
-            headers = ['Commodity', 'Country', 'Food Supply Stage', 'Year', 'Predicted Loss %']
-            for col, header in enumerate(headers, 1):
-                ws.cell(row=1, column=col, value=header)
-            row_num = 2
-    else:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'Predictions'
-        headers = ['Commodity', 'Country', 'Food Supply Stage', 'Year', 'Predicted Loss %']
-        for col, header in enumerate(headers, 1):
-            ws.cell(row=1, column=col, value=header)
-        row_num = 2
-    
-    ws.cell(row=row_num, column=1, value=commodity)
-    ws.cell(row=row_num, column=2, value=country)
-    ws.cell(row=row_num, column=3, value=stage)
-    ws.cell(row=row_num, column=4, value=year)
-    ws.cell(row=row_num, column=5, value=round(prediction, 2))
-    
-    wb.save(excel_path)
-    print(f"Results saved to: {excel_path}")
-    print("Previous predictions are preserved.")
-    print("The new prediction has been added below the previous results.")
-    
-except Exception as e:
-    print(f"Could not save to Excel: {e}")
+                    feature_name = (
+                        feature_name[:52]
+                        +
+                        "..."
+                    )
 
-print("\n" + "="*60)
-print("PREDICTION AND EXPLAINABLE AI ANALYSIS COMPLETED SUCCESSFULLY")
-print("="*60)
+                ax1.text(
+                    0.10,
+                    factor_y,
+                    f"{index}. "
+                    f"{feature_name} "
+                    f"({direction} "
+                    f"prediction)",
+                    fontsize=10
+                )
+
+                factor_y -= 0.040
+
+            ax1.text(
+                0.5,
+                0.03,
+                "Generated by SustainFlow AI",
+                fontsize=9,
+                ha="center",
+                style="italic"
+            )
+
+            plt.tight_layout()
+
+            pdf.savefig(
+                fig1,
+                bbox_inches="tight"
+            )
+
+            plt.close()
+
+            # ================================================
+            # PAGE 2 - SHAP BAR CHART
+            # ================================================
+
+            fig2, ax2 = plt.subplots(
+                figsize=(11.7, 8.3)
+            )
+
+            chart_features = (
+                top_shap[
+                    "feature"
+                ].iloc[::-1]
+            )
+
+            chart_values = (
+                top_shap[
+                    "shap_value"
+                ].iloc[::-1]
+            )
+
+            bars = ax2.barh(
+                chart_features,
+                chart_values
+            )
+
+            ax2.set_xlabel(
+                "SHAP Contribution"
+            )
+
+            ax2.set_ylabel(
+                "Feature"
+            )
+
+            ax2.set_title(
+                "TOP FEATURE CONTRIBUTIONS "
+                "TO THIS PREDICTION",
+                fontsize=15,
+                fontweight="bold"
+            )
+
+            ax2.grid(
+                axis="x",
+                alpha=0.3
+            )
+
+            for bar, value in zip(
+                bars,
+                chart_values
+            ):
+
+                ax2.text(
+                    value,
+                    bar.get_y()
+                    +
+                    bar.get_height()
+                    /
+                    2,
+                    f" {value:.4f}",
+                    va="center",
+                    fontsize=8
+                )
+
+            plt.tight_layout()
+
+            pdf.savefig(
+                fig2,
+                bbox_inches="tight"
+            )
+
+            plt.close()
+
+            # ================================================
+            # PAGE 3 - SHAP TABLE
+            # ================================================
+
+            fig3, ax3 = plt.subplots(
+                figsize=(11.7, 8.3)
+            )
+
+            ax3.axis(
+                "off"
+            )
+
+            ax3.text(
+                0.5,
+                0.95,
+                "SHAP FEATURE CONTRIBUTION TABLE",
+                fontsize=16,
+                fontweight="bold",
+                ha="center"
+            )
+
+            table_rows = []
+
+            table_rows.append(
+                [
+                    "Rank",
+                    "Feature",
+                    "SHAP Value",
+                    "Impact"
+                ]
+            )
+
+            for index, (
+                _,
+                row
+            ) in enumerate(
+                top_shap
+                .head(15)
+                .iterrows(),
+                start=1
+            ):
+
+                feature_name = str(
+                    row[
+                        "feature"
+                    ]
+                )
+
+                if len(
+                    feature_name
+                ) > 45:
+
+                    feature_name = (
+                        feature_name[:42]
+                        +
+                        "..."
+                    )
+
+                impact = (
+                    "Increases prediction"
+                    if row[
+                        "shap_value"
+                    ]
+                    >= 0
+                    else
+                    "Decreases prediction"
+                )
+
+                table_rows.append(
+                    [
+                        str(
+                            index
+                        ),
+                        feature_name,
+                        f"{row['shap_value']:.5f}",
+                        impact
+                    ]
+                )
+
+            table = ax3.table(
+                cellText=table_rows,
+                loc="center",
+                cellLoc="left",
+                colWidths=[
+                    0.08,
+                    0.50,
+                    0.18,
+                    0.24
+                ]
+            )
+
+            table.auto_set_font_size(
+                False
+            )
+
+            table.set_fontsize(
+                8
+            )
+
+            table.scale(
+                1,
+                1.45
+            )
+
+            for column in range(
+                4
+            ):
+
+                table[
+                    (
+                        0,
+                        column
+                    )
+                ].set_text_props(
+                    weight="bold"
+                )
+
+            plt.tight_layout()
+
+            pdf.savefig(
+                fig3,
+                bbox_inches="tight"
+            )
+
+            plt.close()
+
+        print(
+            "\n" + "=" * 70
+        )
+
+        print(
+            "SHAP EXPLANATION GENERATED SUCCESSFULLY"
+        )
+
+        print(
+            "=" * 70
+        )
+
+        print(
+            f"\nSHAP PDF report:\n"
+            f"{shap_pdf_path}"
+        )
+
+    except Exception as error:
+
+        print(
+            "\nWARNING: SHAP report could not "
+            "be generated."
+        )
+
+        print(
+            f"Reason: {str(error)}"
+        )
+
+
+# ============================================================
+# MAIN PREDICTION PROGRAM
+# ============================================================
+
+def main():
+
+    print("\n" + "=" * 70)
+
+    print(
+        "SUSTAINFLOW AI"
+    )
+
+    print(
+        "FAO FOOD LOSS PREDICTION"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    # Load dataset
+    df = load_dataset()
+
+    # Load model
+    pipeline = load_model()
+
+    # ========================================================
+    # GET AVAILABLE OPTIONS
+    # ========================================================
+
+    commodities = sorted(
+        df[
+            "commodity"
+        ]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist(),
+        key=str.lower
+    )
+
+    countries = sorted(
+        df[
+            "country"
+        ]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist(),
+        key=str.lower
+    )
+
+    stages = sorted(
+        df[
+            "food_supply_stage"
+        ]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist(),
+        key=str.lower
+    )
+
+    years = sorted(
+        df[
+            "year"
+        ]
+        .dropna()
+        .astype(int)
+        .unique()
+        .tolist()
+    )
+
+    # ========================================================
+    # USER SELECTION
+    # ========================================================
+
+    print(
+        "\nYou can select using:"
+    )
+
+    print(
+        "1. Number from the list"
+    )
+
+    print(
+        "2. Exact name"
+    )
+
+    print(
+        "3. Partial name to get suggestions"
+    )
+
+    print(
+        "\nAll available dataset items "
+        "will be displayed."
+    )
+
+    # Commodity
+    commodity = select_option(
+        "Commodity",
+        commodities
+    )
+
+    # Country
+    country = select_option(
+        "Country",
+        countries
+    )
+
+    # Food Supply Stage
+    stage = select_option(
+        "Food Supply Stage",
+        stages
+    )
+
+    # Year
+    year = select_year(
+        years
+    )
+
+    # ========================================================
+    # CREATE MODEL INPUT
+    # ========================================================
+
+    input_df = pd.DataFrame(
+        {
+            "commodity":
+                [commodity],
+
+            "country":
+                [country],
+
+            "food_supply_stage":
+                [stage],
+
+            "year":
+                [year]
+        }
+    )
+
+    # ========================================================
+    # MAKE PREDICTION
+    # ========================================================
+
+    print("\n" + "=" * 70)
+
+    print(
+        "MAKING PREDICTION"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    prediction_array = (
+        pipeline.predict(
+            input_df
+        )
+    )
+
+    # Inverse log-transform: model outputs log1p(loss_percentage)
+    prediction = float(
+        np.expm1(prediction_array[0])
+    )
+
+    risk_level = get_risk_level(
+        prediction
+    )
+
+    # ========================================================
+    # DISPLAY RESULT
+    # ========================================================
+
+    print("\n" + "=" * 70)
+
+    print(
+        "FOOD LOSS PREDICTION RESULT"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"\nCommodity: "
+        f"{commodity}"
+    )
+
+    print(
+        f"Country: "
+        f"{country}"
+    )
+
+    print(
+        f"Food Supply Stage: "
+        f"{stage}"
+    )
+
+    print(
+        f"Year: "
+        f"{year}"
+    )
+
+    print(
+        "\n" + "-" * 70
+    )
+
+    print(
+        f"\nPREDICTED FOOD LOSS: "
+        f"{prediction:.2f}%"
+    )
+
+    print(
+        f"\nRISK LEVEL: "
+        f"{risk_level}"
+    )
+
+    print(
+        "\n" + "=" * 70
+    )
+
+    # ========================================================
+    # SAVE PREDICTION
+    # ========================================================
+
+    save_prediction(
+        input_df,
+        prediction
+    )
+
+    # ========================================================
+    # GENERATE SHAP REPORT
+    # ========================================================
+
+    generate_shap_report(
+        pipeline,
+        input_df,
+        prediction,
+        df
+    )
+
+    print("\n" + "=" * 70)
+
+    print(
+        "PREDICTION PROCESS COMPLETE"
+    )
+
+    print(
+        "=" * 70
+    )
+
+
+# ============================================================
+# RUN PROGRAM
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()

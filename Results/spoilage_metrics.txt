@@ -1,0 +1,38 @@
+======================================================================
+MODULE 3 - SPOILAGE RISK MODEL METRICS (LEAKAGE-FREE V2 DATASET)
+======================================================================
+
+Training rows: 20,760
+Testing rows:  5,190
+
+Features: loss_percentage, avg_demand_log, volatility_ratio, peak_month, stage_code, year
+Model: Gradient Boosting (150 stages, depth 4, lr 0.08)
+Label: external shelf-life fragility score (>= 55 -> high risk)
+
+----------------------------------------------------------------------
+GRADIENT BOOSTING CLASSIFIER (MAIN MODEL)
+----------------------------------------------------------------------
+Accuracy:          73.18%
+Balanced accuracy: 71.38%
+Precision:         0.2981
+Recall:            0.6889
+F1-Score:          0.4161
+ROC-AUC:           0.7553
+
+Confusion Matrix (test):
+  True negative:  3,302
+  False positive: 1,168
+  False negative: 224
+  True positive:  496
+
+Classification Report:
+              precision    recall  f1-score   support
+
+           0       0.94      0.74      0.83      4470
+           1       0.30      0.69      0.42       720
+
+    accuracy                           0.73      5190
+   macro avg       0.62      0.71      0.62      5190
+weighted avg       0.85      0.73      0.77      5190
+
+======================================================================

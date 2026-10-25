@@ -1,46 +1,40 @@
-FAO Food Loss Prediction - Model Evaluation (merged real data)
-============================================================
-Split method: plain train_test_split (no synthetic data, no leakage risk)
-Features: commodity (raw), country (raw), food_supply_stage (raw), year
-Rows used (real only): 25950
-Unique commodities: 201
-Unique countries: 159
+======================================================================
+FAO FOOD LOSS MODEL METRICS (LEAKAGE-FREE)
+======================================================================
 
-Ridge (linear baseline):
-  RMSE: 4.357  MAE: 2.228  R^2: 0.513
+Training rows: 20773
+Testing rows: 5177
+Unique groups in train: 14712
+Unique groups in test: 3679
+Overlapping groups: 0
+Target transform: log1p (skewness 3.6820 -> 0.7668)
 
-Random Forest:
-  RMSE: 3.670  MAE: 1.466  R^2: 0.654
+----------------------------------------------------------------------
+CROSS-VALIDATION (5-Fold GroupKFold)
+----------------------------------------------------------------------
+Mean R2:   0.4401 (+/- 0.0186)
+Mean RMSE: 4.7925 (+/- 0.1397)
 
-Random Forest R^2 by food_supply_stage:
-  collector: n=4  R^2=-0.385
-  distribution: n=6  R^2=0.113
-  export: n=11  R^2=-0.247
-  farm: n=1895  R^2=0.418
-  food services: n=7  R^2=-0.058
-  grading: n=1 (too few test rows for a stable R^2)
-  harvest: n=763  R^2=-0.017
-  households: n=46  R^2=0.369
-  market: n=15  R^2=0.758
-  packing: n=4  R^2=-4.050
-  post-harvest: n=14  R^2=0.378
-  pre-harvest: n=2 (too few test rows for a stable R^2)
-  processing: n=86  R^2=0.181
-  retail: n=102  R^2=0.480
-  storage: n=567  R^2=0.233
-  trader: n=6  R^2=-4.291
-  transport: n=395  R^2=0.334
-  whole supply chain: n=1227  R^2=0.886
-  wholesale: n=39  R^2=0.282
+----------------------------------------------------------------------
+RIDGE REGRESSION (BASELINE)
+----------------------------------------------------------------------
+RMSE: 4.5371
+MAE:  2.0416
+R2:   0.4847
 
-Sample predictions (first 10 test rows, Random Forest):
-  Commodity: wheat | Country: eritrea | Stage: harvest | Year: 2020 | Actual: 4.43% | Predicted: 4.43%
-  Commodity: potatoes | Country: jordan | Stage: whole supply chain | Year: 2011 | Actual: 12.49% | Predicted: 8.17%
-  Commodity: millet | Country: zambia | Stage: storage | Year: 2008 | Actual: 2.60% | Predicted: 2.53%
-  Commodity: sorghum | Country: ethiopia | Stage: harvest | Year: 2018 | Actual: 4.55% | Predicted: 4.55%
-  Commodity: sweet potatoes | Country: peru | Stage: whole supply chain | Year: 2004 | Actual: 20.64% | Predicted: 20.65%
-  Commodity: maize (corn) | Country: botswana | Stage: farm | Year: 2021 | Actual: 2.21% | Predicted: 3.48%
-  Commodity: rice | Country: malawi | Stage: transport | Year: 2001 | Actual: 1.00% | Predicted: 1.00%
-  Commodity: papayas | Country: india | Stage: storage | Year: 2014 | Actual: 0.79% | Predicted: 0.53%
-  Commodity: sesame seed | Country: jordan | Stage: whole supply chain | Year: 2010 | Actual: 2.58% | Predicted: 2.71%
-  Commodity: sunflower seed | Country: germany | Stage: whole supply chain | Year: 2004 | Actual: 1.44% | Predicted: 1.73%
+----------------------------------------------------------------------
+RANDOM FOREST (MAIN MODEL)
+----------------------------------------------------------------------
+RMSE: 4.6540
+MAE:  1.9589
+R2:   0.4579
+
+----------------------------------------------------------------------
+MODEL SELECTION RATIONALE
+----------------------------------------------------------------------
+Random Forest slightly underperforms Ridge on the test set
+(R2 0.4579 vs 0.4847), but Random Forest is still preferred
+because it can model non-linear relationships and interactions between
+commodity, country and supply stage, which Ridge cannot capture.
+Random Forest also provides feature importance values used for
+explainable AI (SHAP) analysis.
